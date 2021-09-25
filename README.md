@@ -1,0 +1,2 @@
+# Blackjack
+Pythonで作ったブラックジャックです。
