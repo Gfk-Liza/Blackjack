@@ -7,4 +7,5 @@ exeファイルものせておきました。
 ・random
 ・time
 
-https://github.com/Sh0TaR0/blackjack_game/blob/master/blackjack_oop_final.py　を元にして作りました。
+https://github.com/Sh0TaR0/blackjack_game/blob/master/blackjack_oop_final.py
+を元にして作りました。
