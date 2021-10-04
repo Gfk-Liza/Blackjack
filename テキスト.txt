@@ -1,0 +1,359 @@
+import bpy
+import math
+import random
+import datetime
+import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import shortest_path,dijkstra
+print("----------------------------------------------------------------------")
+
+#数値決め
+#今回は試行錯誤が出来る様、やや過剰に数値に名前を与えています。 pep-8破っているところも多いですが、多めに見て頂ければ……
+num_of_blocks=9 #奇数
+num_of_height_variation=6+0 #0を元々の高さとしてこの数分だけマイナスの差分がある
+cuboid_sidelength=3 #直方体の短い方の一辺の長さ
+foundation_height=60 #>=max(2*negative_length)
+HEIGHT_OF_EACH_STEP=4 #直方体同士のデフォルトの高さの差 固定値
+scale_factor=region=9 #直方体同士の間隔に等しい ≒math.sqrt(2)*HEIGHT_OF_EACH_STEP*num_of_height_variation/(num_of_blocks*(math.sqrt(2)-1))
+#print(math.sqrt(2)*HEIGHT_OF_EACH_STEP*num_of_height_variation/(num_of_blocks*(math.sqrt(2)-1)))
+entire_cube_sidelength=region*num_of_blocks #球に内接する立方体の一辺の長さ
+entire_sphere_radius=entire_cube_sidelength*math.sqrt(3/4) #直方体たちが形成する球の半径
+last_adjustment=2 #計算をミスってしまっていたので、最後の調整用の数値です。
+isfinal=True
+
+########################################################################
+
+def func_z(X,Y): #XYはマス目の番号 (X:-(num_of_blocks-1)//2～+(num_of_blocks-1)//2 Y:-(num_of_blocks-1)//2～+(num_of_blocks-1)//2)
+    x=abs(X)+0.5 #xyは使用する座標の絶対値
+    y=abs(Y)+0.5
+    initial_height=math.sqrt(num_of_blocks**2-x**2-y**2)-num_of_blocks/math.sqrt(2)
+    negative_height=math.floor((num_of_height_variation/(num_of_blocks-num_of_blocks/math.sqrt(2)-0.1))*initial_height)*last_adjustment
+    individual_height=foundation_height-HEIGHT_OF_EACH_STEP*negative_height//last_adjustment #土台を用意し、negative分だけ削る
+    return individual_height
+def isinside(x,y): #list index out of range避け
+    return True if (0<=x<num_of_blocks) and (0<=y<num_of_blocks) else False
+def index_for_dijkstra(x,y):
+    index=x+y*num_of_blocks
+    return index
+def reverse_index_for_dijkstra(index,is_for_direction=False):
+    x=index%num_of_blocks
+    y=index//num_of_blocks
+    if is_for_direction:
+        x=(x if x!=num_of_blocks-1 else -1) 
+        y=(index-x)//num_of_blocks
+    return (x,y)
+
+is_good_maze=False
+
+for highest_counter in range(1000 if isfinal else 1):
+    #球に従うように各直方体の高さを仮置きする
+    height=[[func_z(X,Y) for X in range(-(num_of_blocks-1)//2,(num_of_blocks-1)//2+1)] for Y in range(-(num_of_blocks-1)//2,(num_of_blocks-1)//2+1)]
+
+    #各直方体の高さに平均0、標準偏差(σ)1のランダムさ(*last_adjustment)を与える
+    special_cells=[(0,0),(0,num_of_blocks-1),(num_of_blocks-1,0),(num_of_blocks-1,num_of_blocks-1),((num_of_blocks-1)//2,(num_of_blocks-1)//2)]
+    height=[[height[Y][X] if (X,Y) in special_cells else height[Y][X]+round(random.normalvariate(0,1))*last_adjustment for X in range(num_of_blocks)] for Y in range(num_of_blocks)]
+
+    #角に隣接する直方体について、高さが1*last_adjustmentの差分しかないようにする（つまり、ゴールしやすくする）
+    for X,Y in special_cells[:4]:
+        if height[Y][1 if X==0 else (num_of_blocks-1)-1]!=foundation_height-1*last_adjustment and height[1 if Y==0 else (num_of_blocks-1)-1][X]!=foundation_height-1*last_adjustment:
+            height[Y][1 if X==0 else (num_of_blocks-1)-1]=foundation_height-1*last_adjustment
+
+    row=[] #dijkstra用の辺の情報を表すリスト
+    col=[]
+    data=[]
+
+    #橋や階段などのオブジェクトを3次元空間上にどう配置するかのデータを定める
+    #ここから先4回同じ構造のコードが続きます。関数とか定義すれば良かったのですが、
+    #それぞれの相違を反映させるのが少し面倒なのでこうしました。
+    deleting_rate=0.3
+
+    dif0=[]#BRIDGE
+    dif0_deleted=0
+    for X in range(num_of_blocks):
+        for Y in range(num_of_blocks):
+            for x,y,angle in [(1,0,0),(0,1,-math.pi/2)]: #rotationより、DONT DELETE内のオブジェクトは全てx軸正方向を向くことが要請される
+                if isinside(X+x,Y+y) and height[Y+y][X+x]==height[Y][X]:
+                    if (num_of_blocks//3<=X<2*num_of_blocks//3) and (num_of_blocks//3<=Y<2*num_of_blocks//3) and random.random()<deleting_rate:
+                        dif0_deleted+=1
+                        continue
+                    dif0.append((-(num_of_blocks-1)//2+X+x/2,-(num_of_blocks-1)//2+Y+y/2,height[Y][X],angle))
+                    row.append(index_for_dijkstra(X,Y))
+                    col.append(index_for_dijkstra(X+x,Y+y))
+                    data.append(600) #辺の重み(つまり移動コスト) 長さをcm単位で計測しました
+    dif0=[(x*scale_factor,y*scale_factor,z,-angle) for x,y,z,angle in dif0] #angleにマイナスが付いている理由はおまけで。角度関連はかなり苦肉の策が多いです。
+
+    dif1=[]#STAIRS
+    dif1_deleted=0
+    for X in range(num_of_blocks):
+        for Y in range(num_of_blocks):
+            for x,y,angle in [(1,0,0),(0,1,-math.pi/2)]:
+                if isinside(X+x,Y+y) and height[Y+y][X+x]-height[Y][X]==1*last_adjustment:
+                    if (num_of_blocks//3<=X<2*num_of_blocks//3) and (num_of_blocks//3<=Y<2*num_of_blocks//3) and random.random()<deleting_rate:
+                        dif1_deleted+=1
+                        continue
+                    dif1.append((-(num_of_blocks-1)//2+X+x/2,-(num_of_blocks-1)//2+Y+y/2,(height[Y+y][X+x]+height[Y][X])/2,angle))
+                    row.append(index_for_dijkstra(X,Y))
+                    col.append(index_for_dijkstra(X+x,Y+y))
+                    data.append(683)
+                elif isinside(X+x,Y+y) and height[Y+y][X+x]-height[Y][X]==-1*last_adjustment:
+                    dif1.append((-(num_of_blocks-1)//2+X+x/2,-(num_of_blocks-1)//2+Y+y/2,(height[Y+y][X+x]+height[Y][X])/2,angle+math.pi))
+                    row.append(index_for_dijkstra(X,Y))
+                    col.append(index_for_dijkstra(X+x,Y+y))
+                    data.append(683)
+    dif1=[(x*scale_factor,y*scale_factor,z,-angle) for x,y,z,angle in dif1]
+
+    dif1_diag=[]#DIAGONAL STAIRS
+    for X in range(num_of_blocks):
+        for Y in range(num_of_blocks):
+            for x,y,angle in [(1,1,-math.pi/4),(1,-1,math.pi/4)]:
+                if ((num_of_blocks-1)//2,(num_of_blocks-1)//2) in ((X,Y),(X+x,Y+y)):
+                    continue #中央地点から対角線上に経路が伸びてほしくないので
+                if isinside(X+x,Y+y) and height[Y+y][X+x]-height[Y][X]==1*last_adjustment:
+                    dif1_diag.append((-(num_of_blocks-1)//2+X+x/2,-(num_of_blocks-1)//2+Y+y/2,(height[Y+y][X+x]+height[Y][X])/2,angle))
+                    row.append(index_for_dijkstra(X,Y))
+                    col.append(index_for_dijkstra(X+x,Y+y))
+                    data.append(969)
+                elif isinside(X+x,Y+y) and height[Y+y][X+x]-height[Y][X]==-1*last_adjustment:
+                    dif1_diag.append((-(num_of_blocks-1)//2+X+x/2,-(num_of_blocks-1)//2+Y+y/2,(height[Y+y][X+x]+height[Y][X])/2,angle+math.pi))
+                    row.append(index_for_dijkstra(X,Y))
+                    col.append(index_for_dijkstra(X+x,Y+y))
+                    data.append(969)
+    dif1_diag=[(x*scale_factor,y*scale_factor,z,-angle) for x,y,z,angle in dif1_diag]
+    temp_dif1_diag_len=len(dif1_diag)
+    #https://note.nkmk.me/python-list-unique-duplicate/ 参考
+    dif1_diag_seen=[] #二つの階段が交差してしまっている場合、片方を取り除く
+    dif1_diag=[(x,y,z,angle) for x,y,z,angle in dif1_diag if (x,y) not in dif1_diag_seen and not dif1_diag_seen.append((x,y))]
+
+    dif2=[]#SLOPE
+    for X in (0,1,num_of_blocks-3,num_of_blocks-2): #元々の範囲がnum_of_blocksまでのため-1,さらにx,yの値が正だからさらに-1,つまり-2
+        for Y in (0,1,num_of_blocks-3,num_of_blocks-2): #num_of_blocks=9の時用にX,Yはそれぞれ4個までにしている。場合によっては増減させる
+            for x,y,angle in [(1,0,0),(0,1,-math.pi/2)]:
+                if isinside(X+x,Y+y) and height[Y+y][X+x]-height[Y][X]==2*last_adjustment:
+                    dif2.append((-(num_of_blocks-1)//2+X+x/2,-(num_of_blocks-1)//2+Y+y/2,(height[Y+y][X+x]+height[Y][X])/2,angle))
+                    row.append(index_for_dijkstra(X,Y))
+                    col.append(index_for_dijkstra(X+x,Y+y))
+                    data.append(721)
+                elif isinside(X+x,Y+y) and height[Y+y][X+x]-height[Y][X]==-2*last_adjustment:
+                    dif2.append((-(num_of_blocks-1)//2+X+x/2,-(num_of_blocks-1)//2+Y+y/2,(height[Y+y][X+x]+height[Y][X])/2,angle+math.pi))
+                    row.append(index_for_dijkstra(X,Y))
+                    col.append(index_for_dijkstra(X+x,Y+y))
+                    data.append(721)
+    dif2=[(x*scale_factor,y*scale_factor,z,-angle) for x,y,z,angle in dif2]
+
+
+    #####dijkstra#####
+    row_np=np.array(row)
+    col_np=np.array(col)
+    data_np=np.array(data)
+    graph=csr_matrix((data_np, (row_np, col_np)), shape=(num_of_blocks**2, num_of_blocks**2)).toarray()
+    #https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csr_matrix.html
+    #https://note.nkmk.me/python-scipy-shortest-path/ 参考
+    distance=dijkstra(graph, directed=False, indices=[index_for_dijkstra(x,y) for x,y in [(0,0),(0,num_of_blocks-1),(num_of_blocks-1,0),(num_of_blocks-1,num_of_blocks-1)]])
+    distance_mid=[distance[i][index_for_dijkstra((num_of_blocks-1)//2,(num_of_blocks-1)//2)] for i in range(4)]
+
+    #中央地点に到達可能か
+    print("highest_counter:",highest_counter,"  number of reachable corners:",4-distance_mid.count(float('inf')))
+    if 4-distance_mid.count(float('inf'))==4:
+        print("congratulations!!!!!")
+        is_good_maze=True
+        break
+#以上までがhighest_counterによるループ
+
+if not is_good_maze:
+    print("There was not any good mazes.\nTRY AGAIN")
+    #当たり前ですが、ここでsys.exitを使うとこのスクリプトのみならずblender自体が終了します。
+    #私は何も考えずにそれをやらかして!?!?となりました。
+    #以下elseで分岐してもいいですが、インデントが嫌なので今回は続行しています。
+
+#print("height:",height,"\n")
+#print("dif0:",dif0)
+#print("len(dif0)=",len(dif0),"(deleted=",dif0_deleted,")\n")
+#print("dif1:",dif1)
+#print("len(dif1)=",len(dif1),"(deleted=",dif1_deleted,")\n")
+#print("dif1_diag:",dif1_diag)
+#print("len(dif1_diag)=",len(dif1_diag),"(deleted=",temp_dif1_diag_len-len(dif1_diag),")\n")
+#print("dif2:",dif2)
+#print("len(dif2)=",len(dif2),"\n")
+#print("row:",row)
+#print("col:",col)
+#print("data:",data)
+
+rowcol=[[row[i],col[i]] for i in range(len(row))]
+#print("(row,col)-->\n",rowcol,"\n")
+rowcol_flatten=sum(rowcol,[])
+
+def isconnected(i):
+    for j in range(4):
+        if distance[j][i]!=float('inf'):
+            return True
+    return False
+
+
+#####宝箱の場所決めなど#####
+dead_end_points=[i for i in range(num_of_blocks**2) if rowcol_flatten.count(i)==1 and isconnected(i)]
+#スタート地点にもゴール地点にも近くない場所の行き止まりのみに宝箱を設置します
+valid_dead_end_points=[point for point in dead_end_points \
+    if (num_of_blocks//3<=reverse_index_for_dijkstra(point)[0]<2*num_of_blocks//3 or num_of_blocks//3<=reverse_index_for_dijkstra(point)[1]<2*num_of_blocks//3) \
+    and (not (num_of_blocks//3<=reverse_index_for_dijkstra(point)[0]<2*num_of_blocks//3 and num_of_blocks//3<=reverse_index_for_dijkstra(point)[1]<2*num_of_blocks//3))]    
+
+try:
+    treasure_chest=random.choice(valid_dead_end_points)
+except IndexError:
+    treasure_chest=random.choice(dead_end_points)
+    print("WARNING!!! This is not desirable. You chose an invalid dead end point as treasure chest location")
+
+print("treasure_chest",reverse_index_for_dijkstra(treasure_chest))
+before_treasure_chest=rowcol_flatten[rowcol_flatten.index(treasure_chest)+1] if rowcol_flatten.index(treasure_chest)%2==0 else rowcol_flatten[rowcol_flatten.index(treasure_chest)-1]
+print("before",reverse_index_for_dijkstra(before_treasure_chest))
+direction=reverse_index_for_dijkstra(before_treasure_chest-treasure_chest,True)
+print("direction",direction)
+treasure_chest_angle=direction[1]*(2-direction[0])*math.pi/4 if direction[1]!=0 else (1-direction[0])*math.pi/2
+#print("treasure_chest_angle",treasure_chest_angle)
+treasure_x,treasure_y=reverse_index_for_dijkstra(treasure_chest)
+treasure_chest_data=[((-(num_of_blocks-1)//2+treasure_x)*scale_factor,(-(num_of_blocks-1)//2+treasure_y)*scale_factor,height[treasure_y][treasure_x],treasure_chest_angle)]
+
+#print("distance-->\n",distance,"\n")
+print("X:0 Y:0-->",distance_mid[0])
+print("X:0 Y:{}-->".format(num_of_blocks-1),distance_mid[1])
+print("X:{} Y:0-->".format(num_of_blocks-1),distance_mid[2])
+print("X:{0} Y:{0}-->".format(num_of_blocks-1),distance_mid[3])
+
+
+#####(Unityで使うための)データを保存#####
+dt_now=str(datetime.datetime.now()).replace(":","_").replace("-","_").replace(".","") #ファイル名として使えない文字などを取り除く
+dt_now=dt_now[-11:-6] #最終的に用いるには日時だと長すぎるので、分秒だけを取り出します。
+
+def conversion_for_unity(mydata): #Unityの形式に合うようデータを整形します。
+    return [[x,y,z-foundation_height-entire_cube_sidelength/2,(180*angle/math.pi)] for x,y,z,angle in mydata]
+def write_txt_file(name:str,mylist:list): #C#の形式に合うようデータを出力します。
+    leny=len(mylist)
+    txt_file.write("\tpublic static readonly float[,] {0} = \n".format(name+"_side_"+dt_now))
+    txt_file.write("\t{\n")
+    temp_txt_list=["\t\t{"+"f,".join([str(n) for n in mylist[i]])+"f}," for i in range(leny)] #fはfloatへのキャスト
+    txt_file.write("\n".join(temp_txt_list)+"\n")
+    txt_file.write("\t};\n\n")
+
+height_for_txt=[[height[j][i]-foundation_height-entire_cube_sidelength/2 for i in range(num_of_blocks)]for j in range(num_of_blocks)]
+dif0_for_txt=conversion_for_unity(dif0)
+dif1_for_txt=conversion_for_unity(dif1)
+dif1_diag_for_txt=conversion_for_unity(dif1_diag)
+dif2_for_txt=conversion_for_unity(dif2)
+treasure_chest_for_txt=conversion_for_unity(treasure_chest_data)
+distance_for_txt=[[[distance[k][index_for_dijkstra(i,j)] for i in range(num_of_blocks)] for j in range(num_of_blocks)] for k in range(4)]
+
+#1048576==2**20 C#はint型にinfがないそうなので、この数で代用しました。桁あふれが怖いので、少し小さめです。
+distance_for_txt=[[[distance_for_txt[k][j][i] if distance_for_txt[k][j][i]!=float('inf') else 1048576 for i in range(num_of_blocks)] for j in range(num_of_blocks)] for k in range(4)]
+with open("C:\\Users\\hari64\\OneDrive\\ドキュメント\\Blender\\blender script\\"+"maze_data_"+dt_now+".txt","x") as txt_file: #txtを日付付きで新規作成
+    write_txt_file("height",height_for_txt)
+    write_txt_file("dif0",dif0_for_txt) #unityとblenderで軸などが異なりますが、ここでは数値を変換せずblenderの値をそのまま出力します。
+    write_txt_file("dif1",dif1_for_txt) #ちなみに書いておくと、blenderでのz軸がunityでのy軸になります。
+    write_txt_file("dif1_diag",dif1_diag_for_txt)
+    write_txt_file("dif2",dif2_for_txt)
+    write_txt_file("treasure_chest",treasure_chest_for_txt)
+
+with open("C:\\Users\\hari64\\OneDrive\\ドキュメント\\Blender\\blender script\\"+"maze_dijkstra_"+dt_now+".txt","x") as txt_file:
+    txt_file.write("\tint[,,] distance_side_"+dt_now+" = new int[4,{0},{0}]\n".format(num_of_blocks))
+    txt_file.write("\t{\n")
+    for k in range(4):
+        txt_file.write("\t\t{\n")
+        for j in range(num_of_blocks): #intのためfは不要
+            txt_file.write("\t\t\t{"+",".join(map(lambda x: str(int(x)), distance_for_txt[k][j]))+"},\n")
+        txt_file.write("\t\t},\n")
+    txt_file.write("\t};\n\n")
+
+
+########################################################################
+#ここからbpyで実際にblender上へオブジェクトを配置していきます
+
+
+#####全削除#####
+for COLLECTION in bpy.context.scene.collection.children:
+    if COLLECTION.name=="DONT DELETE":
+        continue
+    bpy.context.scene.collection.children.unlink(COLLECTION)
+#for item in bpy.context.scene.collection.objects: #Scene Collectionに直接属しているオブジェクトを削除
+#    bpy.context.scene.collection.objects.unlink(item)
+#今回は最後までそれが発生しなかったのでコメントアウトしたままです
+#for item in bpy.data.objects: #これだとDONT DELETE内のオブジェクトもすべて削除されてしまいます
+#    bpy.data.objects.remove(item) #全削除コマンドとしてこれが一番有名な気がしますが、今回は使えません
+for _ in range(6): #6回繰り返しているのはpurgeがネスト内のものに対して有効に働かないからです
+#system consoleを見る限り、恐らく今回は5回でも大丈夫ですが、たとえ回数が多くとも
+#Info: No orphaned data-blocks to purgeを吐くだけなので問題はありません。
+#今回はemptyからcollection instanceを作成しているので回数が増えています。
+    bpy.ops.outliner.orphans_purge() #orphansを消去しないと、命名などの邪魔になります。
+
+#####originial collectionの作成#####
+original_collection = bpy.data.collections.new("ORIGINAL"+dt_now)
+bpy.context.scene.collection.children.link(original_collection)
+original_collection = bpy.context.view_layer.layer_collection.children[original_collection.name]
+bpy.context.view_layer.active_layer_collection = original_collection 
+
+for x in range(-(num_of_blocks-1)//2,(num_of_blocks-1)//2+1):
+    for y in range(-(num_of_blocks-1)//2,(num_of_blocks-1)//2+1):
+        bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0.5))
+        bpy.ops.transform.resize(value=(cuboid_sidelength, cuboid_sidelength, 1))
+        bpy.ops.transform.translate(value=(region*x ,region*y , 0))
+        bpy.ops.object.origin_set(type='ORIGIN_CURSOR')
+        bpy.ops.transform.resize(value=(1, 1, height[y+(num_of_blocks-1)//2][x+(num_of_blocks-1)//2]))
+
+bpy.data.collections["DONT DELETE"].hide_select=True #一部を選択させない
+bpy.ops.object.select_all(action='SELECT') #当たり前ですが、select allを書くときは本当に全てを選択してよいのか確かめましょう。
+bpy.ops.transform.translate(value=(0, 0, -foundation_height-entire_cube_sidelength/2))
+bpy.ops.object.origin_set(type='ORIGIN_CURSOR')
+bpy.ops.object.select_all(action='DESELECT') #そしてdeselectもお忘れなく。私は二つとも失念して惨敗しました。
+bpy.data.collections["DONT DELETE"].hide_select=False
+
+
+#途中まで利用していました。
+#####instance collectionの作成#####
+if not isfinal:
+    instance_collection = bpy.data.collections.new("INSTANCE")
+    bpy.context.scene.collection.children.link(instance_collection)
+    instance_collection = bpy.context.view_layer.layer_collection.children[instance_collection.name]
+    bpy.context.view_layer.active_layer_collection = instance_collection 
+
+    for i in range(5):
+        bpy.ops.object.empty_add(type='PLAIN_AXES', align='WORLD', location=(0, 0, 0), scale=(1, 1, 1))
+        bpy.ops.transform.rotate(value=math.pi/2 if i!=4 else math.pi, orient_axis='X')
+        bpy.ops.transform.rotate(value=i*math.pi/2 if i!=4 else 0, orient_axis='Z')
+        bpy.context.object.instance_type = 'COLLECTION' #emptyのインスタンス機能を使う
+        bpy.context.object.instance_collection = bpy.data.collections[original_collection.name] #インスタンスコレクションとしてORIGINALを選択
+    bpy.ops.object.select_all(action='DESELECT')
+
+
+
+#####橋や階段の建設#####
+def construction(target_object:str,dif_data):
+    bpy.context.view_layer.objects.active = bpy.data.objects[target_object]
+    bpy.data.collections[original_collection.name].objects.link(bpy.context.view_layer.objects.active)
+    bpy.data.collections['DONT DELETE'].objects.unlink(bpy.context.view_layer.objects.active)
+    for x,y,z,angle in dif_data:
+        bpy.context.view_layer.objects.active = bpy.data.objects[target_object]
+        bpy.context.view_layer.objects.active.select_set(True)
+        bpy.ops.object.duplicate_move(OBJECT_OT_duplicate={"linked":True, "mode":'TRANSLATION'},TRANSFORM_OT_translate={"value":(x,y,z-foundation_height-entire_cube_sidelength/2)})
+        bpy.ops.transform.rotate(value=angle, orient_axis='Z',constraint_axis=(False,False,True))
+        bpy.ops.object.select_all(action='DESELECT')
+    bpy.context.view_layer.objects.active = bpy.data.objects[target_object]
+    bpy.data.collections['DONT DELETE'].objects.link(bpy.context.view_layer.objects.active)
+    bpy.data.collections[original_collection.name].objects.unlink(bpy.context.view_layer.objects.active)
+
+construction("BRIDGE",dif0)
+construction("STAIRS",dif1)
+construction("DIAGONAL STAIRS",dif1_diag)
+construction("SLOPE",dif2)
+construction("TREASURE CHEST",treasure_chest_data)
+
+
+#####FBX(3DCG用のファイル形式)のエクスポート#####
+if isfinal: #これを実行するとBlocksの回転がblender上ではおかしくなります
+    bpy.context.view_layer.objects.active = bpy.data.objects['Cube']
+    bpy.context.view_layer.objects.active.select_set(True)
+    bpy.context.view_layer.objects.active.name="Blocks_"+dt_now
+    for i in range(num_of_blocks**2-1): #添え字がついていないものが必ず一つできるので、それを除くための-1
+        bpy.data.objects['Cube.{:0=3}'.format(i+1)].select_set(True)
+    bpy.ops.object.join() #扱いやすいように結合しておく
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    bpy.ops.transform.rotate(value=math.pi, orient_axis='Z',constraint_axis=(False,False,True))
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    bpy.ops.export_scene.fbx(filepath='C:\\Users\\hari64\\OneDrive\\ドキュメント\\Blender\\blender script\\FBX_side_Blocks_'+dt_now+'.fbx', use_selection=True, bake_space_transform=True, object_types={'MESH'})
+    bpy.ops.transform.rotate(value=-math.pi, orient_axis='Z',constraint_axis=(False,False,True))
