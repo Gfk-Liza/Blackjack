@@ -1,6 +1,6 @@
 #import関連
-from math import inf, floor
 import random
+from math import floor, inf
 from time import sleep
 
 
@@ -14,7 +14,6 @@ class Card():
 
 
 class Deck():
-
     def __init__(self):
         suits = ['♠', '♥', '♣', '♦']
         numbers = [
@@ -35,7 +34,7 @@ class Deck():
 
         self.cards = []
 
-        for i in range(6):
+        for _ in range(6):
             for suit in suits:
                 for number in numbers:
                     self.cards.append(Card(suit, number))
@@ -49,7 +48,6 @@ class Deck():
 
 
 class Hand():
-
     def __init__(self, dealer=False):
         self.dealer = dealer
         self.cards = []
@@ -85,6 +83,17 @@ class Hand():
         if not self.dealer:
             print('Total:', self.calc_value())
         print()
+
+
+def henkin(Zs, kane, kane_hen):
+    match Zs:
+        case 'Mwin':
+            kane += kane_hen*2
+        case 'BR':
+            kane += floor(kane_hen*2.5)
+        case 'Mdrw':
+            kane += kane_hen
+    return kane
 
 
 #Gameエンジンメイン部分
@@ -139,7 +148,7 @@ class Game():
                     game_to_play = inf
                 else:
                     game_to_play = int(game_to_play_kai)
-            except ValueError:
+            except:
                 print('数字で入力してください(未定ならばinf)> ')
         
         while not(not(game_number < game_to_play) or not(kane != 0)): #n回プレイする
@@ -158,7 +167,7 @@ class Game():
             player_cards = 2
             dealer_cards = 2
 
-            for i in range(2):
+            for _ in range(2):
                 player_hand.add_card(deck.deal())
                 dealer_hand.add_card(deck.deal())
 
@@ -183,12 +192,7 @@ class Game():
 
             #ブラックジャック判定
             if self.check_winner(player_hand, dealer_hand, player_cards, dealer_cards):
-                if Zs == 'Mwin':
-                    kane = kane + kane_hen*2
-                elif Zs == 'BR':
-                    kane = kane + floor(kane_hen*2.5)
-                elif Zs == 'Mdraw':
-                    kane = kane + kane_hen
+                kane = henkin(Zs, kane, kane_hen)
                 continue
 
             #プレイヤーのターン
@@ -205,13 +209,7 @@ class Game():
                     player_hand.show()
 
             if self.check_winner(player_hand, dealer_hand, player_cards, dealer_cards):
-                if Zs == 'Mwin':
-                    kane = kane + kane_hen*2
-                elif Zs == 'BR':
-                    kane = kane + floor(kane_hen*2.5)
-                elif Zs == 'Mdraw':
-                    kane = kane + kane_hen
-                
+                kane = henkin(Zs, kane, kane_hen)
                 continue
 
             #ディーラーのターン
@@ -223,24 +221,15 @@ class Game():
             
             #結果出力
             if self.check_winner(player_hand, dealer_hand, player_cards, dealer_cards):
-                if Zs == 'Mwin':
-                    kane = kane + kane_hen*2
-                elif Zs == 'BR':
-                    kane = kane + floor(kane_hen*2.5)
-                elif Zs == 'Mdraw':
-                    kane = kane + kane_hen
+                kane = henkin(Zs, kane, kane_hen)
                 continue
 
             print('結果発表')
             print('Your hand:', player_hand.calc_value())
             print('Dealer hand:', dealer_hand.calc_value())
             self.check_winner(player_hand, dealer_hand, player_cards, dealer_cards, game_over=True)
-            if Zs == 'Mwin':
-                kane = kane + kane_hen*2
-            elif Zs == 'BR':
-                kane = kane + floor(kane_hen*2.5)
-            elif Zs == 'Mdraw':
-                kane = kane + kane_hen
+
+            kane = henkin(Zs, kane, kane_hen)
         
         #破産判定
         if kane <= 0:
@@ -257,6 +246,5 @@ game.play()
 
 
 #exe用
-for i in range(2):
-    print()
+print('\n')
 input('終了するにはEnterキーを押してください> ')
